@@ -1,0 +1,46 @@
+# Same gates as the GitHub workflow, for GitLab.
+image: node:22
+
+stages: [verify, test, nightly]
+
+cache:
+  key: { files: [package-lock.json] }
+  paths: [node_modules/]
+
+before_script:
+  - npm ci
+
+typecheck:
+  stage: verify
+  script: npm run typecheck
+
+pr-gate:
+  stage: test
+  rules: [{ if: $CI_PIPELINE_SOURCE == "merge_request_event" }]
+  script: npx playwright test --grep "@smoke|@p0"
+  artifacts:
+    when: always
+    paths: [playwright-report/]
+    reports: { junit: test-results/junit.xml }
+
+full-mock:
+  stage: test
+  rules: [{ if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH }]
+  script: npx playwright test
+  artifacts:
+    when: always
+    paths: [playwright-report/]
+    reports: { junit: test-results/junit.xml }
+
+nightly-sandbox:
+  stage: nightly
+  rules: [{ if: $CI_PIPELINE_SOURCE == "schedule" }]
+  variables:
+    ROOTS_TARGET: sandbox
+    ROOTS_BASE_URL: https://api.sandbox.roots.finance
+    # ROOTS_API_TOKEN and ROOTS_OTHER_CLIENT_TOKEN come from masked CI/CD variables
+  script: npx playwright test --grep-invert @mock-only
+  artifacts:
+    when: always
+    paths: [playwright-report/]
+    reports: { junit: test-results/junit.xml }

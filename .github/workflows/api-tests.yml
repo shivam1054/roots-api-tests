@@ -1,0 +1,61 @@
+name: API tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 1 * * *' # nightly, full suite against the real sandbox
+  workflow_dispatch:
+
+jobs:
+  # Every PR: typecheck + P0 tests against the mock. Fast, no secrets, blocks merge.
+  pr-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx playwright test --grep "@smoke|@p0"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: pr-report, path: playwright-report, retention-days: 7 }
+
+  # Merge to main: the whole suite against the mock.
+  full-mock:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: main-report, path: playwright-report, retention-days: 14 }
+
+  # Nightly: the same tests against the real Roots sandbox.
+  nightly-sandbox:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ROOTS_TARGET: sandbox
+      ROOTS_BASE_URL: https://api.sandbox.roots.finance
+      ROOTS_API_TOKEN: ${{ secrets.ROOTS_SANDBOX_API_TOKEN }}
+      ROOTS_OTHER_CLIENT_TOKEN: ${{ secrets.ROOTS_SANDBOX_OTHER_CLIENT_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx playwright test --grep-invert @mock-only
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: nightly-sandbox-report, path: playwright-report, retention-days: 30 }

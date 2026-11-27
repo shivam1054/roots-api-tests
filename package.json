@@ -1,0 +1,22 @@
+{
+  "name": "roots-api-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "API test automation framework for the Roots USD accounts API (Playwright + TypeScript)",
+  "scripts": {
+    "mock": "tsx mock-server/server.ts",
+    "test": "playwright test",
+    "test:smoke": "playwright test --grep @smoke",
+    "test:p0": "playwright test --grep @p0",
+    "test:money": "playwright test --grep @money",
+    "test:sandbox": "ROOTS_TARGET=sandbox playwright test --grep-invert @mock-only",
+    "typecheck": "tsc --noEmit",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
