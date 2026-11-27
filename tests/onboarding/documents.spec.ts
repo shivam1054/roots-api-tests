@@ -17,7 +17,12 @@ test.describe('Document upload', () => {
 
     expectStatus(res, 201);
     expect(res.body.id).toMatch(/^doc_/);
-    expect(res.body).toMatchObject({ subject_id: person.id, type: 'passport' });
+    expect(res.body).toMatchObject({ subject_type: 'person', subject_id: person.id, type: 'passport', status: 'uploaded', content_type: 'application/pdf' });
+    expect(res.body.size_bytes).toBeGreaterThan(0);
+
+    const list = await api.documents.list(person.id);
+    expectStatus(list, 200);
+    expect(list.body.data.map((d) => d.id)).toContain(res.body.id);
   });
 
   test('accepts every documented document type', { tag: ['@contract'] }, async ({ api }) => {

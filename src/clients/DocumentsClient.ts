@@ -1,5 +1,5 @@
 import type { RootsHttp, RequestOptions } from '../http/RootsHttp';
-import type { DocumentType } from '../models/types';
+import type { DocumentSummary, DocumentType, Page } from '../models/types';
 
 /** Minimal valid PDF, enough for sandbox KYC uploads. */
 const TINY_PDF = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n');
@@ -17,7 +17,7 @@ export class DocumentsClient {
 
   upload(personId: string, type: DocumentType | string, extra: Record<string, string> = {}, opts: UploadOptions = {}) {
     const { subjectType = 'person', omitFile = false, ...requestOpts } = opts;
-    return this.http.request<{ id: string; subject_id: string; type: string }>('POST', '/api/v1/documents', {
+    return this.http.request<DocumentSummary>('POST', '/api/v1/documents', {
       ...requestOpts,
       multipart: {
         subject_type: subjectType,
@@ -27,5 +27,9 @@ export class DocumentsClient {
         ...(omitFile ? {} : { file: { name: `${type}.pdf`, mimeType: 'application/pdf', buffer: TINY_PDF } }),
       },
     });
+  }
+
+  list(personId: string, opts: RequestOptions = {}) {
+    return this.http.request<Page<DocumentSummary>>('GET', '/api/v1/documents', { ...opts, query: { subject_type: 'person', subject_id: personId } });
   }
 }

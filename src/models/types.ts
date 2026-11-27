@@ -41,6 +41,7 @@ export type AccountStatus = 'pending' | 'active' | 'frozen' | 'closed' | 'failed
 export interface Account {
   id: string;
   person_id: string;
+  label: string | null;
   currency: 'usd';
   status: AccountStatus;
   status_detail: string | null;
@@ -52,11 +53,11 @@ export interface Counterparty {
   id: string;
   person_id: string;
   status: 'active' | 'blocked' | 'frozen' | 'deleted';
-  status_detail: string | null;
+  status_detail: 'screening_rejected' | 'screening_pending' | 'manual_freeze' | null;
   external_account_information: { account_number: string; routing_number: string; supported_rails: string[] };
 }
 
-export type Rail = 'internal' | 'ach' | 'sameday_ach' | 'fedwire';
+export type Rail = 'internal' | 'ach' | 'sameday_ach' | 'fedwire' | 'fednow' | 'swift';
 export type TransferStatus = 'pending' | 'submitted' | 'settled' | 'failed' | 'returned' | 'reversed' | 'cancelled';
 export const TERMINAL_STATUSES: TransferStatus[] = ['settled', 'failed', 'returned', 'reversed', 'cancelled'];
 
@@ -71,6 +72,8 @@ export interface Transfer {
   fee_quoted_minor: MinorUnits;
   fee_charged_minor: MinorUnits;
   fee_mode: 'on_top' | 'deducted';
+  purpose: string | null;
+  memo: string | null;
   status: TransferStatus;
   status_detail: string | null;
   failure: { code: string; message: string; return_code?: string | null; return_description?: string | null } | null;
@@ -80,6 +83,11 @@ export interface Transfer {
   settled_at: string | null;
   failed_at: string | null;
   returned_at: string | null;
+  reversed_at: string | null;
+  cancelled_at: string | null;
+  cancel_requested_at: string | null;
+  /** Whether POST /transfers/{id}/cancel is worth trying now (a hint, not a promise). */
+  cancelable: boolean;
 }
 
 export type LedgerEntryType = 'principal' | 'fee' | 'hold' | 'release';
@@ -88,8 +96,44 @@ export interface LedgerEntry {
   account_id: string;
   transfer_id: string | null;
   type: LedgerEntryType;
+  flow: string;
   amount_minor: MinorUnits; // signed: negative = money left the account
-  created_at: string;
+  currency: string;
+  reason: string | null;
+  occurred_at: string;
+  posted_at: string | null;
 }
 
-export interface List<T> { data: T[] }
+/** Every list endpoint answers with this page envelope. */
+export interface Page<T> { data: T[]; page: number; page_size: number; total: number }
+/** @deprecated use Page */
+export type List<T> = Page<T>;
+
+export const TRANSFER_PURPOSES = ['treasury', 'family_support', 'supplier_payment', 'payroll', 'intercompany', 'investment', 'trade_settlement', 'loan_repayment', 'goods_services', 'other'] as const;
+
+export interface FundingDetails {
+  id: string;
+  account_holder: string;
+  account_number: string;
+  routing_number: string;
+  swift_bic?: string | null;
+  institution_name: string;
+}
+
+export interface BillingBalances {
+  billing_minor: MinorUnits;
+  revenue_minor: MinorUnits;
+  min_minor: MinorUnits;
+  blocked: boolean;
+}
+
+export interface DocumentSummary {
+  id: string;
+  subject_type: 'person';
+  subject_id: string;
+  type: string;
+  status: 'uploaded' | 'accepted' | 'rejected';
+  content_type: string;
+  size_bytes: number;
+  uploaded_at: string;
+}

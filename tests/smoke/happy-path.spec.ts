@@ -39,6 +39,15 @@ test.describe('Smoke: onboard, fund, move money', () => {
     for (const f of ['amount_minor', 'fee_quoted_minor', 'fee_charged_minor'] as const) expect(body[f]).toMatch(/^\d+$/);
     expect(['on_top', 'deducted']).toContain(body.fee_mode);
     expect(body.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    for (const ts of ['settled_at', 'failed_at', 'returned_at'] as const) expect(body[ts]).toBeNull();
+    for (const ts of ['settled_at', 'failed_at', 'returned_at', 'reversed_at', 'cancelled_at', 'cancel_requested_at'] as const) expect(body[ts]).toBeNull();
+    expect(typeof body.cancelable).toBe('boolean');
+    expect(body.purpose).toBe('treasury');
+  });
+
+  test('billing balance is readable and not blocked after top-up', { tag: ['@smoke', '@contract'] }, async ({ api }) => {
+    const res = await api.billing.get();
+    expectStatus(res, 200);
+    for (const f of ['billing_minor', 'revenue_minor', 'min_minor'] as const) expect(res.body[f]).toMatch(/^\d+$/);
+    expect(res.body.blocked).toBe(false);
   });
 });

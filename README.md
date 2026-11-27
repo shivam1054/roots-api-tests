@@ -21,18 +21,27 @@ npm run test:sandbox    # same suite against the real sandbox
 
 ## What is covered
 
+107 tests, checked against every endpoint in the Roots API reference (Persons, Accounts, Transfers, Counterparties, Fees/Billing, Sandbox).
+
 | Area | Example checks |
 |---|---|
-| Smoke | Onboard a customer, open and fund an account, move money, check both balances |
-| Onboarding and compliance | `review_not_ready` lists every gap. A sanctioned person is denied and can't open an account. A referred person waits for a manual decision. A cleared file is locked. |
-| Document upload | All 19 document types accepted. Unknown type, wrong `subject_type`, bad `issued_country` (`USA`, `XX`, `us`), `document_number` over 64 characters or with control characters, missing file: each returns 422 naming the field. Same-key retry returns the same document, a different type with the same key is 409, another client's person is 404. |
-| Accounts | Provisioning to active, close refused while there's a balance, frozen accounts can't send, closed is terminal |
-| Internal transfers | Hold while in flight (available ↓, pending ↑, current unchanged), moves exactly once, insufficient funds, a decline releases the hold, 8 invalid amount formats |
-| Withdrawals | ACH settles and the fee posts once. Rejected at submission. **Settled then returned (R03): principal back, fee kept, `settled_at` kept.** Blocked counterparty. Unsupported rail. Account number masked. |
+| Smoke | Onboard a customer, open and fund an account, move money, check both balances. Transfer and billing response contracts. |
+| Onboarding and compliance | `review_not_ready` lists every gap. A sanctioned person is denied and can't open an account. A referred person waits for a manual decision. A cleared file is locked to edits and new documents. A person without a role can't hold an account until given one. |
+| Document upload | All 19 document types. Bad `subject_type`, `issued_country`, `document_number` or a missing file each return 422 naming the field. Same-key retry returns the same document; listing shows it. |
+| Accounts | Provisioning to active, close refused while there's a balance or while opening, frozen accounts can't send, closed is terminal, label rules, unknown fields rejected. Funding details (ABA routing number, account number) only once the bank account exists. |
+| Ledger | Ledger checks after every money test. Filters by transfer and credit/debit, single-entry lookup, another account's entry is 404, `page_size` max 100. |
+| Transfer validation | **Client can't send a fee, total or rate** (strict body). `purpose` required (and `description` for `other`). Amount: positive integer string, at most 11 digits, 11 bad formats rejected. ACH memo: 80 printable ASCII. `external_id` charset. Unavailable rails refused with nothing held. |
+| Internal transfers | Hold while in flight, moves exactly once, insufficient funds refused and listed as failed, a decline releases the hold with no principal entry. |
+| Withdrawals | ACH settles and the fee is posted once. Rejected at submission. Settled then returned (R03): principal back, fee kept, `settled_at` kept. Unsupported rail refused. |
+| Cancel | ACH cancelled early: hold released, no fee, not a failure. ACH at the bank: cancel requested then confirmed. A sent wire, an internal transfer or a settled payment can't be cancelled. Cancelling twice is safe. |
+| Counterparties | Frozen and deleted counterparties can't be paid; deleted stays readable for history. **Bank details are immutable** (no redirecting an approved payee). A screening block can't be lifted via the API. Routing number, Fedwire bank name, rails and unknown fields validated. Account number masked. |
 | Idempotency | Replay returns the same transfer (`Idempotent-Replayed`). Different body gives 409. Byte-exact comparison. Missing key gives 422. The same key twice in parallel creates one transfer. A refusal is replayed. |
-| Concurrency | Two $80 transfers from $100 at once: exactly one wins and the balance never goes negative. 10 parallel transfers add up to the cent. |
-| Security | 401 for missing, malformed or unknown keys. **Another client gets 404 (not 403)** for my accounts and transfers and can't move my money. Error bodies never leak stack traces. |
+| Concurrency | Two transfers or two withdrawals racing for the same balance: exactly one wins, the balance never goes negative. 10 parallel transfers add up to the cent. |
+| Lists | Page envelope (`data`, `page`, `page_size`, `total`), account filter matches either leg, paging has no gaps or duplicates, status filter. |
+| Security | 401 for missing, malformed or unknown keys. **Another client gets 404 (not 403)**. Error bodies never leak stack traces. `X-Request-ID` echoed for log correlation. |
 | Webhooks | HMAC-SHA256 signature check, tampered body, wrong secret, stale timestamp, a forged timestamp, malformed headers, duplicate events |
+
+Not covered yet: business onboarding (associations, UBOs), fee rules and quotes, reserves, exports and statements, and the webhook receiver against live sandbox events.
 
 ## Structure
 

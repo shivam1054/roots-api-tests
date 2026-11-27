@@ -6,6 +6,7 @@ import { AccountsClient } from './AccountsClient';
 import { CounterpartiesClient } from './CounterpartiesClient';
 import { TransfersClient } from './TransfersClient';
 import { SandboxClient } from './SandboxClient';
+import { BillingClient } from './BillingClient';
 
 /** One object per API key: `api.transfers.create(...)`, `api.accounts.get(...)`. */
 export class RootsApi {
@@ -16,6 +17,7 @@ export class RootsApi {
   readonly counterparties: CounterpartiesClient;
   readonly transfers: TransfersClient;
   readonly sandbox: SandboxClient;
+  readonly billing: BillingClient;
 
   constructor(ctx: APIRequestContext, token: string) {
     this.http = new RootsHttp(ctx, token);
@@ -25,5 +27,6 @@ export class RootsApi {
     this.counterparties = new CounterpartiesClient(this.http);
     this.transfers = new TransfersClient(this.http);
     this.sandbox = new SandboxClient(this.http);
+    this.billing = new BillingClient(this.http);
   }
 }

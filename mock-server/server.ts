@@ -27,6 +27,7 @@ const accounts = new Map<string, any>();
 const counterparties = new Map<string, any>();
 const transfers = new Map<string, any>();
 const ledger: any[] = [];
+const documents: any[] = [];
 const holds = new Map<string, { accountId: string; amount: bigint }>(); // transferId -> active hold
 const idem = new Map<string, { compare: string; done: boolean; status?: number; body?: any }>();
 const locks = new Set<string>();
@@ -38,7 +39,6 @@ class ApiError extends Error {
 }
 const fail = (status: number, code: string, detail: string, violations?: any[]): never => { throw new ApiError(status, code, detail, violations); };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const isMinor = (v: unknown) => typeof v === 'string' && /^\d+$/.test(v) && BigInt(v) > 0n;
 
 function owned<T extends { client: string }>(map: Map<string, T>, key: string, client: string, what: string): T {
   const v = map.get(key);
@@ -47,8 +47,20 @@ function owned<T extends { client: string }>(map: Map<string, T>, key: string, c
 }
 const strip = ({ client, ...rest }: any) => rest;
 
-function addEntry(accountId: string, transferId: string | null, type: string, amount: bigint) {
-  ledger.push({ id: id('txn'), account_id: accountId, transfer_id: transferId, type, amount_minor: amount.toString(), created_at: now() });
+const FLOWS: Record<string, string> = { principal: 'principal', fee: 'fee_charge', hold: 'hold_place', release: 'hold_release' };
+function addEntry(accountId: string, transferId: string | null, type: string, amount: bigint, reason: string | null = null) {
+  const t = now();
+  ledger.push({ id: id('txn'), account_id: accountId, transfer_id: transferId, type, flow: FLOWS[type], amount_minor: amount.toString(), currency: 'usd', reason, occurred_at: t, posted_at: t, rail_refs: {}, bank_ref: null });
+}
+
+/** Page envelope used by every list endpoint: {data, page, page_size, total}. */
+function paginate(rows: any[], q: URLSearchParams) {
+  const page = Number(q.get('page') ?? 1), size = Number(q.get('page_size') ?? 20);
+  const v: any[] = [];
+  if (!Number.isInteger(page) || page < 1) v.push({ path: 'page', code: 'invalid' });
+  if (!Number.isInteger(size) || size < 1 || size > 100) v.push({ path: 'page_size', code: 'invalid', message: 'between 1 and 100' });
+  if (v.length) fail(422, 'validation', 'Request validation failed', v);
+  return { data: rows.slice((page - 1) * size, page * size), page, page_size: size, total: rows.length };
 }
 
 function balance(accountId: string) {
@@ -78,7 +90,7 @@ function setStatus(t: any, status: string, extra: Record<string, unknown> = {}) 
 // ---------- transfer lifecycle (async, like the real rails) ----------
 function failTransfer(t: any, code: string, message: string) {
   releaseHold(t);
-  setStatus(t, 'failed', { failure: { code, message, return_code: null, return_description: null } });
+  setStatus(t, 'failed', { status_detail: null, cancelable: false, failure: { code, message, return_code: null, return_description: null } });
 }
 
 function settle(t: any) {
@@ -86,14 +98,14 @@ function settle(t: any) {
   consumeHold(t);
   addEntry(src, t.id, 'principal', -BigInt(t.amount_minor));
   if (t.direction === 'internal') addEntry(t.destination.id, t.id, 'principal', BigInt(t.amount_minor));
-  if (BigInt(t.fee_quoted_minor) > 0n) { addEntry(src, t.id, 'fee', -BigInt(t.fee_quoted_minor)); t.fee_charged_minor = t.fee_quoted_minor; }
-  setStatus(t, 'settled');
+  if (BigInt(t.fee_quoted_minor) > 0n) { addEntry(src, t.id, 'fee', -BigInt(t.fee_quoted_minor), `${t.rail}_withdrawal`); t.fee_charged_minor = t.fee_quoted_minor; }
+  setStatus(t, 'settled', { status_detail: null, cancelable: false });
 }
 
 function returnTransfer(t: any, code: string) {
   if (t.direction === 'withdrawal') addEntry(t.source.id, t.id, 'principal', BigInt(t.amount_minor)); // fee is NOT refunded
   else addEntry(t.destination.id, t.id, 'principal', -BigInt(t.amount_minor));
-  setStatus(t, 'returned', { failure: { code: code === 'R03' ? 'invalid_bank_details' : 'returned', message: 'Returned by the receiving bank', return_code: code, return_description: code === 'R03' ? 'No account / unable to locate account' : 'Returned' } });
+  setStatus(t, 'returned', { failure: { code: code === 'R03' ? 'invalid_bank_details' : code === 'R01' ? 'insufficient_funds' : 'returned_ach', message: 'Returned by the receiving bank', return_code: code, return_description: code === 'R03' ? 'No account / unable to locate account' : 'Returned' } });
 }
 
 function runLifecycle(t: any, accountNumber?: string) {
@@ -101,10 +113,11 @@ function runLifecycle(t: any, accountNumber?: string) {
     if (t.status !== 'pending') return;
     if (t.direction === 'internal' && t.amount_minor === '13') return failTransfer(t, 'payment_failed', 'Payment declined');
     if (accountNumber === '000111111116') return failTransfer(t, 'rail_rejected', 'Rejected by the rail at submission');
-    setStatus(t, 'submitted');
+    if (t.direction === 'withdrawal') t.fee_quoted_minor = FEES[t.rail].toString(); // quoted once priced, not in the 201
+    setStatus(t, 'submitted', { status_detail: 'bank_processing', cancelable: t.direction === 'withdrawal' && t.rail !== 'fedwire' });
     if (t.direction !== 'withdrawal') return; // internal transfers wait for sandbox settle
     setTimeout(() => {
-      if (t.status !== 'submitted') return;
+      if (t.status !== 'submitted' || t.status_detail === 'cancel_requested') return;
       if (accountNumber === '000222222227') return failTransfer(t, 'rail_rejected', 'Rejected by the receiving bank');
       settle(t);
       if (accountNumber === '000333333335') setTimeout(() => returnTransfer(t, 'R03'), STEP_MS);
@@ -123,6 +136,27 @@ function createPerson(client: string, b: any): Result {
   const p = { id: id('person'), client, type: b.type, role: b.role ?? null, external_id: b.external_id ?? null, details: b.details, mailing_address: b.mailing_address ?? null, financial: b.financial ?? null, operational: b.operational ?? null, documents: [] as string[], status: 'pending', status_detail: 'onboarding_incomplete', created_at: now() };
   persons.set(p.id, p);
   return { status: 201, body: strip(p) };
+}
+
+function patchPerson(client: string, personId: string, b: any): Result {
+  const p = owned(persons, personId, client, 'person');
+  if (p.status !== 'pending' || p.status_detail === 'in_review') fail(409, 'conflict', 'A person whose review has an outcome is closed to edits; a change of circumstances is a new review');
+  if (b?.type && b.type !== p.type) fail(409, 'conflict', 'type is immutable');
+  if (b?.role !== undefined && p.role !== null && b.role !== p.role) fail(409, 'conflict', 'A role, once set, never changes');
+  for (const k of ['details', 'mailing_address', 'financial', 'operational']) if (b?.[k]) p[k] = { ...(p[k] ?? {}), ...b[k] };
+  if (b?.role !== undefined) p.role = b.role;
+  return { status: 200, body: strip(p) };
+}
+
+function changeRole(client: string, personId: string, b: any): Result {
+  const p = owned(persons, personId, client, 'person');
+  if (!['customer', 'own'].includes(b?.role)) fail(422, 'validation', 'role must be customer or own', [{ path: 'role', code: 'invalid' }]);
+  if (b.role === 'own' && p.type === 'individual') fail(422, 'validation', 'An individual is never own', [{ path: 'role', code: 'invalid' }]);
+  if (p.role === b.role) return { status: 200, body: strip(p) };
+  if (p.role !== null) fail(409, 'conflict', 'A role never changes once set');
+  if (p.status !== 'active') fail(409, 'conflict', 'The person must have a cleared review');
+  p.role = b.role;
+  return { status: 200, body: strip(p) };
 }
 
 function submitReview(client: string, personId: string): Result {
@@ -167,13 +201,17 @@ function uploadDocument(client: string, fields: Record<string, string>): Result 
   const p = owned(persons, fields.subject_id, client, 'person');
   if (p.status !== 'pending' || p.status_detail === 'in_review') fail(409, 'conflict', 'Person file is locked');
   p.documents.push(fields.type);
-  return { status: 201, body: { id: id('doc'), subject_type: 'person', subject_id: p.id, type: fields.type, document_number: fields.document_number ?? null, issued_country: fields.issued_country ?? null, created_at: now() } };
+  const size = Number(fields.file.split(':').pop());
+  const doc = { id: id('doc'), subject_type: 'person', subject_id: p.id, type: fields.type, status: 'uploaded', content_type: 'application/pdf', size_bytes: size, document_number: fields.document_number ?? null, issued_country: fields.issued_country ?? null, uploaded_at: now() };
+  documents.push({ ...doc, client });
+  return { status: 201, body: doc };
 }
 
 function createAccount(client: string, b: any): Result {
   if (!b?.person_id) fail(422, 'validation', 'person_id is required', [{ path: 'person_id', code: 'required' }]);
   const p = owned(persons, b.person_id, client, 'person');
   if (!['customer', 'own'].includes(p.role) || p.status !== 'active') fail(422, 'person_review_not_cleared', 'Person review is not cleared');
+  if (b.label !== undefined && (typeof b.label !== 'string' || b.label.length < 1 || b.label.length > 60)) fail(422, 'validation', 'label must be 1-60 characters', [{ path: 'label', code: 'invalid' }]);
   const a = { id: id('acct'), client, person_id: p.id, label: b.label ?? null, currency: 'usd', status: 'pending', status_detail: 'provisioning', provider_account_id: null, created_at: now(), active_at: null as string | null, closed_at: null as string | null };
   accounts.set(a.id, a);
   setTimeout(() => Object.assign(a, { status: 'active', status_detail: null, active_at: now() }), STEP_MS);
@@ -181,8 +219,20 @@ function createAccount(client: string, b: any): Result {
 }
 
 const ACCOUNT_TRANSITIONS: Record<string, string[]> = { pending: ['active', 'failed'], active: ['frozen', 'closed'], frozen: ['active', 'closed'], failed: ['closed'], closed: [] };
+function fundingDetails(client: string, accountId: string): Result {
+  const a = owned(accounts, accountId, client, 'account');
+  if (a.status === 'pending' || a.status === 'failed') fail(409, 'account_not_provisioned', 'The account has no bank account number yet');
+  const p = persons.get(a.person_id);
+  const digits = BigInt('0x' + a.id.slice(5, 17)).toString().padStart(12, '0').slice(-12);
+  return { status: 200, body: { id: a.id, currency: 'usd', account_holder: `${p.details.first_name ?? p.details.business_name} ${p.details.last_name ?? ''}`.trim(), account_number: digits, routing_number: '084106768', swift_bic: null, institution_name: 'Mock Sponsor Bank, N.A.', institution_address: { line1: '1 Main Street', city: 'St. Louis', state: 'MO', postal_code: '63101', country: 'US' } } };
+}
+
 function patchAccount(client: string, accountId: string, b: any): Result {
   const a = owned(accounts, accountId, client, 'account');
+  const extra = Object.keys(b ?? {}).filter((k) => !['status', 'label'].includes(k));
+  if (extra.length) fail(422, 'validation', 'Unknown fields', extra.map((path) => ({ path, code: 'extra_forbidden' })));
+  if (b?.label !== undefined) { if (typeof b.label !== 'string' || b.label.length < 1 || b.label.length > 60) fail(422, 'validation', 'label must be 1-60 characters', [{ path: 'label', code: 'invalid' }]); a.label = b.label; }
+  if (b?.status === undefined) return { status: 200, body: accountView(a) };
   const to = b?.status;
   if (to === 'closed' && a.status === 'pending') fail(409, 'provisioning_in_progress', 'Account is still being provisioned');
   if (!ACCOUNT_TRANSITIONS[a.status]?.includes(to)) fail(409, 'illegal_transition', `Cannot move account from ${a.status} to ${to}`);
@@ -199,23 +249,65 @@ function createCounterparty(client: string, b: any): Result {
   const acct = b?.external_account_information ?? {};
   if (!acct.routing_number) v.push({ path: 'external_account_information.routing_number', code: 'required' });
   if (!acct.account_number) v.push({ path: 'external_account_information.account_number', code: 'required' });
+  const allowed = ['person_id', 'counterparty_type', 'relationship_to_person', 'external_id', 'description', 'label', 'counterparty_information', 'external_account_information'];
+  for (const k of Object.keys(b ?? {})) if (!allowed.includes(k)) v.push({ path: k, code: 'extra_forbidden' });
+  if (b?.counterparty_type && !['business', 'individual'].includes(b.counterparty_type)) v.push({ path: 'counterparty_type', code: 'invalid' });
+  if (b?.relationship_to_person && !['customer', 'self'].includes(b.relationship_to_person)) v.push({ path: 'relationship_to_person', code: 'invalid' });
+  if (acct.routing_number && !/^\d{9}$/.test(String(acct.routing_number))) v.push({ path: 'external_account_information.routing_number', code: 'invalid', message: '9 digits' });
+  if (acct.account_number && !/^[A-Za-z0-9._:-]{1,64}$/.test(String(acct.account_number))) v.push({ path: 'external_account_information.account_number', code: 'invalid' });
+  const rails: string[] = acct.supported_rails ?? [];
+  if (!rails.length || rails.some((r) => !['ach', 'fedwire', 'fednow'].includes(r))) v.push({ path: 'external_account_information.supported_rails', code: 'invalid' });
+  if (rails.includes('fedwire') && !acct.institution_name) v.push({ path: 'external_account_information.institution_name', code: 'required', message: 'Fedwire needs the institution name' });
   if (v.length) fail(422, 'validation', 'Request validation failed', v);
   owned(persons, b.person_id, client, 'person');
   const info = b.counterparty_information;
   const name = `${info.business_name ?? ''} ${info.first_name ?? ''} ${info.last_name ?? ''}`.toUpperCase();
   const status = name.includes('SANCTIONED-TEST') ? ['blocked', 'screening_rejected'] : name.includes('REFERRED-TEST') ? ['blocked', 'screening_pending'] : ['active', null];
-  const c = { id: id('cpty'), client, person_id: b.person_id, counterparty_type: b.counterparty_type, external_id: b.external_id ?? null, relationship_to_person: b.relationship_to_person, status: status[0], status_detail: status[1], created_at: now(), counterparty_information: info, _account_number: acct.account_number, external_account_information: { external_account_type: 'bank_account', supported_rails: acct.supported_rails ?? ['ach'], account_subtype: acct.account_subtype ?? 'checking', account_number: `****${String(acct.account_number).slice(-4)}`, routing_number: acct.routing_number, institution_name: acct.institution_name ?? null } };
+  const c = { id: id('cpty'), client, person_id: b.person_id, counterparty_type: b.counterparty_type, external_id: b.external_id ?? null, label: b.label ?? null, description: b.description ?? null, relationship_to_person: b.relationship_to_person, status: status[0], status_detail: status[1], created_at: now(), counterparty_information: info, _account_number: acct.account_number, external_account_information: { external_account_type: 'bank_account', supported_rails: acct.supported_rails ?? ['ach'], account_subtype: acct.account_subtype ?? 'checking', account_number: `****${String(acct.account_number).slice(-4)}`, routing_number: acct.routing_number, institution_name: acct.institution_name ?? null } };
   counterparties.set(c.id, c);
   return { status: 201, body: cptyView(c) };
 }
 const cptyView = (c: any) => { const { _account_number, ...rest } = strip(c); return rest; };
 
+function patchCounterparty(client: string, cptyId: string, b: any): Result {
+  const c = owned(counterparties, cptyId, client, 'counterparty');
+  if (c.status === 'deleted') fail(409, 'conflict', 'Counterparty is deleted');
+  const ext = b?.external_account_information ?? {};
+  if (b?.person_id !== undefined || ext.account_number !== undefined || ext.routing_number !== undefined) fail(409, 'conflict', 'person_id and bank account identifiers are immutable');
+  if (b?.status !== undefined) {
+    if (!['frozen', 'active'].includes(b.status)) fail(422, 'validation', 'status can only be frozen or active', [{ path: 'status', code: 'invalid' }]);
+    if (c.status === 'blocked') fail(409, 'illegal_transition', 'A blocked counterparty is set by screening and cannot be changed');
+    Object.assign(c, b.status === 'frozen' ? { status: 'frozen', status_detail: 'manual_freeze' } : { status: 'active', status_detail: null });
+  }
+  if (b?.label !== undefined) c.label = b.label;
+  return { status: 200, body: cptyView(c) };
+}
+
+function deleteCounterparty(client: string, cptyId: string): Result {
+  const c = owned(counterparties, cptyId, client, 'counterparty');
+  Object.assign(c, { status: 'deleted', status_detail: null });
+  return { status: 204 };
+}
+
 async function createTransfer(client: string, b: any): Promise<Result> {
   const v: any[] = [];
   if (b?.source?.type !== 'account' || !b?.source?.id) v.push({ path: 'source', code: 'invalid' });
   if (!['account', 'counterparty'].includes(b?.destination?.type) || !b?.destination?.id) v.push({ path: 'destination', code: 'invalid' });
-  if (!isMinor(b?.amount_minor)) v.push({ path: 'amount_minor', code: 'invalid', message: 'Must be a positive integer in minor units, sent as a string' });
+  // TransferCreateRequest is strict: unknown fields (e.g. a client-computed fee or total) are rejected.
+  const allowed = ['source', 'destination', 'amount_minor', 'currency', 'rail', 'purpose', 'description', 'memo', 'external_id'];
+  for (const k of Object.keys(b ?? {})) if (!allowed.includes(k)) v.push({ path: k, code: 'extra_forbidden' });
+  if (!(typeof b?.amount_minor === 'string' && /^[1-9][0-9]*$/.test(b.amount_minor) && b.amount_minor.length <= 11)) v.push({ path: 'amount_minor', code: 'invalid', message: 'Positive integer in minor units, as a string, at most 11 digits' });
   if (b?.currency !== undefined && b.currency !== 'usd') v.push({ path: 'currency', code: 'invalid' });
+  if (!PURPOSES.includes(b?.purpose)) v.push({ path: 'purpose', code: b?.purpose === undefined ? 'required' : 'invalid' });
+  if (b?.purpose === 'other' && !b?.description) v.push({ path: 'description', code: 'required', message: 'Required when purpose is other' });
+  if (b?.external_id !== undefined && !/^[A-Za-z0-9._:-]{1,64}$/.test(String(b.external_id))) v.push({ path: 'external_id', code: 'invalid' });
+  if (b?.memo !== undefined) {
+    const m = String(b.memo);
+    const asciiOnly = ['ach', 'sameday_ach', 'fedwire'].includes(b.rail);
+    const max = ['ach', 'sameday_ach'].includes(b.rail) ? 80 : 140;
+    if (!m || m.length > max || /[\x00-\x1f\x7f]/.test(m) || (asciiOnly && !/^[\x20-\x7e]+$/.test(m))) v.push({ path: 'memo', code: 'invalid', message: `Up to ${max} characters${asciiOnly ? ', printable ASCII' : ''}` });
+  }
+  if (b?.rail !== undefined && !['ach', 'sameday_ach', 'fedwire', 'fednow', 'swift', 'internal'].includes(b.rail)) v.push({ path: 'rail', code: 'invalid' });
   if (v.length) fail(422, 'validation', 'Request validation failed', v);
 
   const src = owned(accounts, b.source.id, client, 'account');
@@ -229,6 +321,8 @@ async function createTransfer(client: string, b: any): Promise<Result> {
     if (dst.id === src.id) fail(422, 'validation', 'Source and destination must differ', [{ path: 'destination', code: 'invalid' }]);
     rail = 'internal';
   } else {
+    if (b.rail === 'swift') fail(501, 'rail_not_supported', 'SWIFT is not supported yet');
+    if (b.rail === 'fednow') fail(409, 'rail_not_enabled', 'FedNow is not enabled for this client');
     if (!['ach', 'sameday_ach', 'fedwire'].includes(b.rail)) fail(422, 'validation', 'rail is required for withdrawals', [{ path: 'rail', code: 'invalid' }]);
     if (dst.status !== 'active') fail(409, 'conflict', `Counterparty is ${dst.status}`);
     const rails: string[] = dst.external_account_information.supported_rails;
@@ -243,19 +337,20 @@ async function createTransfer(client: string, b: any): Promise<Result> {
   try {
     await sleep(LOCK_MS);
     const amount = BigInt(b.amount_minor);
-    const fee = FEES[rail];
+    const fee = rail === 'internal' ? 0n : FEES[rail];
     const t: any = {
       id: id('xfer'), client,
       source: { type: 'account', id: src.id }, destination: { type: b.destination.type, id: dst.id },
       direction: toAccount ? 'internal' : 'withdrawal', rail, amount_minor: amount.toString(),
-      fee_quoted_minor: fee.toString(), fee_charged_minor: '0', fee_mode: 'on_top',
-      status: 'pending', status_detail: null, failure: null, purpose: b.purpose ?? null, external_id: b.external_id ?? null,
-      created_at: now(), submitted_at: null, settled_at: null, failed_at: null, returned_at: null, reversed_at: null, cancelled_at: null,
+      fee_quoted_minor: '0', fee_charged_minor: '0', fee_mode: 'on_top', // a withdrawal is quoted a moment after the 201
+      status: 'pending', status_detail: null, failure: null, purpose: b.purpose, description: b.description ?? null, memo: b.memo ?? null, external_id: b.external_id ?? null,
+      created_at: now(), submitted_at: null, settled_at: null, failed_at: null, returned_at: null, reversed_at: null, cancelled_at: null, cancel_requested_at: null,
+      cancelable: !toAccount,
     };
     transfers.set(t.id, t);
     if (BigInt(balance(src.id).available_minor) < amount + fee) {
-      setStatus(t, 'failed', { failure: { code: 'insufficient_funds', message: 'Available balance is below the amount plus fee' } });
-      fail(422, 'insufficient_funds', 'Available balance is below the amount plus fee');
+      setStatus(t, 'failed', { cancelable: false, failure: { code: 'insufficient_funds', message: 'Available balance is below the amount' } });
+      fail(422, 'insufficient_funds', 'Available balance is below the amount');
     }
     placeHold(t, src.id, amount + fee);
     runLifecycle(t, toAccount ? undefined : dst._account_number);
@@ -265,11 +360,41 @@ async function createTransfer(client: string, b: any): Promise<Result> {
   }
 }
 
+const PURPOSES = ['treasury', 'family_support', 'supplier_payment', 'payroll', 'intercompany', 'investment', 'trade_settlement', 'loan_repayment', 'goods_services', 'other'];
+
+/** POST /transfers/{id}/cancel: only withdrawals; before the bank has it, or ACH once sent. */
+function cancelTransfer(client: string, transferId: string): Result {
+  const t = owned(transfers, transferId, client, 'transfer');
+  if (t.status === 'cancelled') return { status: 200, body: strip(t) };
+  if (t.direction !== 'withdrawal' || !['pending', 'submitted'].includes(t.status)) fail(409, 'transfer_not_cancelable', 'This transfer can never be cancelled');
+  if (t.status === 'submitted' && t.rail === 'fedwire') fail(409, 'transfer_not_cancelable', 'A wire already sent to the bank cannot be cancelled');
+  if (t.status_detail === 'cancel_requested') return { status: 200, body: strip(t) };
+  if (t.status === 'pending') {
+    releaseHold(t);
+    setStatus(t, 'cancelled', { status_detail: 'cancelled_before_submission', cancelable: false });
+    return { status: 200, body: strip(t) };
+  }
+  Object.assign(t, { status_detail: 'cancel_requested', cancel_requested_at: now(), cancelable: false });
+  setTimeout(() => { releaseHold(t); setStatus(t, 'cancelled', { status_detail: 'cancelled_at_bank' }); }, STEP_MS);
+  return { status: 200, body: strip(t) };
+}
+
+function listTransfers(client: string, q: URLSearchParams): Result {
+  const status = q.get('status'), direction = q.get('direction'), acct = q.get('account_id');
+  if (status && !['pending', 'submitted', 'settled', 'failed', 'returned', 'cancelled', 'reversed'].includes(status)) fail(422, 'validation', 'Unknown status', [{ path: 'status', code: 'invalid' }]);
+  const rows = [...transfers.values()].filter((t) => t.client === client)
+    .filter((t) => !status || t.status === status).filter((t) => !direction || t.direction === direction)
+    .filter((t) => !acct || t.source?.id === acct || t.destination?.id === acct)
+    .sort((a, b) => (q.get('order') === 'asc' ? 1 : -1) * a.created_at.localeCompare(b.created_at))
+    .map((t) => ({ id: t.id, source: t.source, destination: t.destination, direction: t.direction, rail: t.rail, amount_minor: t.amount_minor, status: t.status, status_detail: t.status_detail, failure: t.failure, external_id: t.external_id, created_at: t.created_at, settled_at: t.settled_at }));
+  return { status: 200, body: paginate(rows, q) };
+}
+
 function sandboxDeposit(client: string, b: any): Result {
   const a = owned(accounts, b?.account_id, client, 'account');
-  if (!isMinor(b?.amount_minor)) fail(422, 'validation', 'amount_minor must be a positive integer string');
+  if (!(typeof b?.amount_minor === 'string' && /^[1-9][0-9]*$/.test(b.amount_minor) && b.amount_minor.length <= 11)) fail(422, 'validation', 'amount_minor must be a positive integer string', [{ path: 'amount_minor', code: 'invalid' }]);
   if (a.status !== 'active') fail(409, 'account_not_active', 'Account is not active');
-  const t: any = { id: id('xfer'), client, source: null, destination: { type: 'account', id: a.id }, direction: 'deposit', rail: 'ach', amount_minor: b.amount_minor, fee_quoted_minor: '0', fee_charged_minor: '0', fee_mode: 'on_top', status: 'pending', status_detail: null, failure: null, external_id: null, created_at: now(), submitted_at: null, settled_at: null, failed_at: null, returned_at: null, reversed_at: null, cancelled_at: null };
+  const t: any = { id: id('xfer'), client, source: null, destination: { type: 'account', id: a.id }, direction: 'deposit', rail: 'ach', amount_minor: b.amount_minor, fee_quoted_minor: '0', fee_charged_minor: '0', fee_mode: 'on_top', status: 'pending', status_detail: null, failure: null, external_id: null, created_at: now(), submitted_at: null, settled_at: null, failed_at: null, returned_at: null, reversed_at: null, cancelled_at: null, cancel_requested_at: null, cancelable: false };
   transfers.set(t.id, t);
   if (String(b.sender_name ?? '').toUpperCase().includes('SANCTIONED-TEST')) t.status_detail = 'awaiting_release';
   else setTimeout(() => { addEntry(a.id, t.id, 'principal', BigInt(t.amount_minor)); setStatus(t, 'settled'); }, STEP_MS);
@@ -281,14 +406,15 @@ function sandboxAnswer(client: string, transferId: string, action: string, b: an
   if (action === 'return') {
     if (t.status !== 'settled' || t.direction === 'internal') fail(409, 'conflict', 'Only settled withdrawals or deposits can be returned');
     const code = b?.return_code ?? 'R01';
-    if (!/^R\d{2}$/.test(code)) fail(422, 'validation', 'return_code must be R plus two digits');
+    if (!/^R\d{2}$/.test(code)) fail(422, 'validation', 'return_code must be R plus two digits', [{ path: 'return_code', code: 'invalid' }]);
     returnTransfer(t, code);
+    return { status: 202, body: { transfer_id: t.id, outcome: 'returned' } };
   } else {
     if (t.status !== 'submitted' || t.direction === 'deposit') fail(409, 'conflict', `Transfer is ${t.status}`);
     if (action === 'fail' && t.direction === 'internal') fail(409, 'conflict', 'Internal transfers can only be settled');
     if (action === 'settle') settle(t); else failTransfer(t, 'rail_rejected', 'Failed by sandbox');
   }
-  return { status: 202, body: { id: t.id } };
+  return { status: 202, body: { transfer_id: t.id, outcome: action === 'settle' ? 'settled' : 'failed' } };
 }
 
 function sandboxReview(client: string, personId: string, b: any): Result {
@@ -353,24 +479,55 @@ async function route(req: http.IncomingMessage, raw: Buffer): Promise<Result> {
   const r = seg.slice(2);
 
   if (method === 'POST' && path === '/api/v1/persons') return idemp('persons.create', () => createPerson(client!, body));
+  if (method === 'GET' && path === '/api/v1/persons') return { status: 200, body: paginate([...persons.values()].filter((p) => p.client === client).map(strip), url.searchParams) };
   if (method === 'GET' && r[0] === 'persons' && r.length === 2) return { status: 200, body: strip(owned(persons, r[1], client!, 'person')) };
+  if (method === 'PATCH' && r[0] === 'persons' && r.length === 2) return patchPerson(client!, r[1], body);
+  if (method === 'POST' && r[0] === 'persons' && r[2] === 'role') return idemp(`persons.role:${r[1]}`, () => changeRole(client!, r[1], body));
+  if (method === 'GET' && path === '/api/v1/documents') {
+    if (url.searchParams.get('subject_type') !== 'person' || !url.searchParams.get('subject_id')) fail(422, 'validation', 'subject_type and subject_id are required');
+    owned(persons, url.searchParams.get('subject_id')!, client!, 'person');
+    return { status: 200, body: paginate(documents.filter((d) => d.client === client && d.subject_id === url.searchParams.get('subject_id')).map(strip), url.searchParams) };
+  }
+  if (method === 'GET' && path === '/api/v1/billing') return { status: 200, body: { billing_minor: '10000000', revenue_minor: '0', min_minor: '100000', blocked: false, billing_available_to_move_minor: '9900000', revenue_available_to_move_minor: '0', allowed_moves: [] } };
   if (method === 'POST' && r[0] === 'persons' && r[2] === 'review' && r[3] === 'submit') return idemp(`review.submit:${r[1]}`, () => submitReview(client!, r[1]));
   if (method === 'POST' && path === '/api/v1/documents') return idemp('documents.create', () => uploadDocument(client!, fields));
   if (method === 'POST' && path === '/api/v1/accounts') return idemp('accounts.create', () => createAccount(client!, body));
+  if (method === 'GET' && path === '/api/v1/accounts') return { status: 200, body: paginate([...accounts.values()].filter((a) => a.client === client).map(accountView), url.searchParams) };
+  if (r[0] === 'accounts' && r[2] === 'details' && method === 'GET') return fundingDetails(client!, r[1]);
+  if (r[0] === 'accounts' && r[2] === 'transactions' && r.length === 4 && method === 'GET') {
+    owned(accounts, r[1], client!, 'account');
+    const e = ledger.find((x) => x.id === r[3] && x.account_id === r[1]);
+    return e ? { status: 200, body: e } : fail(404, 'not_found', 'transaction not found');
+  }
   if (r[0] === 'accounts' && r.length === 2 && method === 'GET') return { status: 200, body: accountView(owned(accounts, r[1], client!, 'account')) };
   if (r[0] === 'accounts' && r.length === 2 && method === 'PATCH') return patchAccount(client!, r[1], body);
   if (r[0] === 'accounts' && r[2] === 'transactions' && method === 'GET') {
     owned(accounts, r[1], client!, 'account');
-    const types = url.searchParams.getAll('type').length ? url.searchParams.getAll('type') : ['principal', 'fee'];
-    return { status: 200, body: { data: ledger.filter((e) => e.account_id === r[1] && types.includes(e.type)).slice().reverse() } };
+    const q = url.searchParams;
+    const types = q.getAll('type').length ? q.getAll('type') : ['principal', 'fee'];
+    const dir = q.get('direction'), xfer = q.get('transfer_id');
+    if (dir && !['credit', 'debit'].includes(dir)) fail(422, 'validation', 'direction must be credit or debit', [{ path: 'direction', code: 'invalid' }]);
+    const rows = ledger.filter((e) => e.account_id === r[1] && types.includes(e.type))
+      .filter((e) => !xfer || e.transfer_id === xfer)
+      .filter((e) => !dir || (dir === 'credit' ? BigInt(e.amount_minor) > 0n : BigInt(e.amount_minor) < 0n))
+      .slice().reverse(); // newest first
+    return { status: 200, body: paginate(rows, q) };
   }
   if (method === 'POST' && path === '/api/v1/counterparties') return idemp('counterparties.create', () => createCounterparty(client!, body));
+  if (method === 'GET' && path === '/api/v1/counterparties') return { status: 200, body: paginate([...counterparties.values()].filter((c) => c.client === client).map(cptyView), url.searchParams) };
   if (method === 'GET' && r[0] === 'counterparties' && r.length === 2) return { status: 200, body: cptyView(owned(counterparties, r[1], client!, 'counterparty')) };
+  if (method === 'PATCH' && r[0] === 'counterparties' && r.length === 2) return patchCounterparty(client!, r[1], body);
+  if (method === 'DELETE' && r[0] === 'counterparties' && r.length === 2) return deleteCounterparty(client!, r[1]);
   if (method === 'POST' && path === '/api/v1/transfers') return idemp('transfers.create', () => createTransfer(client!, body));
+  if (method === 'GET' && path === '/api/v1/transfers') return listTransfers(client!, url.searchParams);
+  if (method === 'POST' && r[0] === 'transfers' && r[2] === 'cancel') return idemp(`transfers.cancel:${r[1]}`, () => cancelTransfer(client!, r[1]));
   if (method === 'GET' && r[0] === 'transfers' && r.length === 2) return { status: 200, body: strip(owned(transfers, r[1], client!, 'transfer')) };
   if (method === 'GET' && r[0] === 'transfers' && r[2] === 'transactions') {
     owned(transfers, r[1], client!, 'transfer');
-    return { status: 200, body: { data: ledger.filter((e) => e.transfer_id === r[1]) } };
+    const all = ledger.filter((e) => e.transfer_id === r[1]);
+    if (!all.length) fail(404, 'not_found', 'This transfer has not been executed, so it has no transactions');
+    const types = url.searchParams.getAll('type').length ? url.searchParams.getAll('type') : ['principal', 'fee'];
+    return { status: 200, body: paginate(all.filter((e) => types.includes(e.type)), url.searchParams) }; // oldest first
   }
   if (method === 'POST' && path === '/api/v1/sandbox/deposits') return sandboxDeposit(client!, body);
   if (method === 'POST' && r[0] === 'sandbox' && r[1] === 'transfers') return sandboxAnswer(client!, r[2], r[3], body);
@@ -383,7 +540,7 @@ http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on('data', (c) => chunks.push(c));
   req.on('end', async () => {
-    const requestId = randomUUID();
+    const requestId = (req.headers['x-request-id'] as string) || randomUUID(); // echoed back when the client sends one
     let out: Result;
     try {
       out = await route(req, Buffer.concat(chunks));

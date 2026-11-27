@@ -8,10 +8,10 @@ export class SandboxClient {
       ...opts, body: { account_id: accountId, amount_minor: amountMinor, ...(senderName ? { sender_name: senderName } : {}) },
     });
   }
-  settle(transferId: string) { return this.http.request('POST', `/api/v1/sandbox/transfers/${transferId}/settle`); }
-  fail(transferId: string) { return this.http.request('POST', `/api/v1/sandbox/transfers/${transferId}/fail`); }
+  settle(transferId: string) { return this.http.request<{ transfer_id: string; outcome: 'settled' }>('POST', `/api/v1/sandbox/transfers/${transferId}/settle`); }
+  fail(transferId: string) { return this.http.request<{ transfer_id: string; outcome: 'failed' }>('POST', `/api/v1/sandbox/transfers/${transferId}/fail`); }
   returnTransfer(transferId: string, returnCode = 'R01') {
-    return this.http.request('POST', `/api/v1/sandbox/transfers/${transferId}/return`, { body: { return_code: returnCode } });
+    return this.http.request<{ transfer_id: string; outcome: 'returned' }>('POST', `/api/v1/sandbox/transfers/${transferId}/return`, { body: { return_code: returnCode } });
   }
   decideReview(personId: string, outcome: 'cleared' | 'denied') {
     return this.http.request('POST', `/api/v1/sandbox/persons/${personId}/review`, { body: { outcome } });

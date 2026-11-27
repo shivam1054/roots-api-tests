@@ -50,4 +50,21 @@ test.describe('Concurrency', () => {
     expect((await api.accounts.get(from.id)).body.balance.current_minor).toBe(usd('66.70'));
     expect((await api.accounts.get(to.id)).body.balance.current_minor).toBe(usd('33.30'));
   });
+
+  test('two withdrawals that together exceed the balance cannot both be accepted', { tag: ['@p0', '@money'] }, async ({ api, world }) => {
+    const from = await world.fundedAccount(usd('100.00'));
+    const cpty = await world.counterparty(from.person_id);
+    const results = await Promise.all([world.withdrawal(from.id, cpty.id, usd('70.00')), world.withdrawal(from.id, cpty.id, usd('70.00'))]);
+
+    expect(results.filter((r) => r.status === 201)).toHaveLength(1);
+    const loser = results.find((r) => r.status !== 201)!;
+    expect(['rate_limited', 'insufficient_funds']).toContain(loser.problem?.code);
+    if (loser.problem?.code === 'rate_limited') expect((await world.withdrawal(from.id, cpty.id, usd('70.00'))).problem?.code).toBe('insufficient_funds');
+
+    const winner = results.find((r) => r.status === 201)!;
+    await world.waitForTransfer(winner.body.id, 'settled');
+    const bal = (await api.accounts.get(from.id)).body.balance;
+    expect(toBig(bal.current_minor)).toBeGreaterThanOrEqual(0n);
+    expectBalanceInvariant(bal);
+  });
 });

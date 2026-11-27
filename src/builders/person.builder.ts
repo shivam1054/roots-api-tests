@@ -36,6 +36,8 @@ export class PersonBuilder {
   sanctioned() { return this.withLastName('SANCTIONED-TEST'); }
   referred() { return this.withLastName('REFERRED-TEST'); }
   without(field: 'date_of_birth' | 'tax_number' | 'email') { delete this.body.details[field]; return this; }
+  /** A person only in a business's ownership/control structure: no role until one is given. */
+  withoutRole() { delete this.body.role; return this; }
   build() { return structuredClone(this.body); }
 }
 

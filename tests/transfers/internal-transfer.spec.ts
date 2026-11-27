@@ -2,7 +2,7 @@ import { test, expect } from '../../src/fixtures/test';
 import { aTransfer } from '../../src/builders/transfer.builder';
 import { expectBalance, expectBalanceInvariant, expectSourceCost } from '../../src/assertions/money';
 import { expectProblem } from '../../src/assertions/problem';
-import { usd } from '../../src/money/money';
+import { add, usd } from '../../src/money/money';
 
 test.describe('Internal transfers', () => {
   test('money is held while in flight, then moves exactly once', { tag: ['@p0', '@money'] }, async ({ api, world }) => {
@@ -49,14 +49,17 @@ test.describe('Internal transfers', () => {
     const bal = (await api.accounts.get(from.id)).body.balance;
     expectBalance(bal, { available_minor: usd('5.00'), pending_minor: '0', current_minor: usd('5.00') });
 
-    const types = (await api.transfers.transactions(body.id)).body.data.map((e) => e.type);
-    expect(types).toEqual(['hold', 'release']); // no principal entry: no money moved
+    // No principal entry for this transfer on the account: no money moved. Any hold was released in full.
+    const entries = (await api.accounts.transactions(from.id, { transferId: body.id, types: ['principal', 'fee', 'hold', 'release'] })).body.data;
+    expect(entries.filter((e) => e.type === 'principal' || e.type === 'fee')).toHaveLength(0);
+    expect(add('0', ...entries.map((e) => e.amount_minor)), 'hold and release net to zero').toBe('0');
   });
 
   // Amounts must be positive integer strings. Floats and numbers are where money bugs start.
   const badAmounts: [string, unknown][] = [
     ['negative', '-500'], ['zero', '0'], ['decimal string', '10.50'], ['JSON number', 1000],
     ['float number', 10.5], ['text', 'abc'], ['empty', ''], ['exponent', '1e3'],
+    ['leading zero', '0100'], ['12 digits (over the 11-digit limit)', '100000000000'], ['spaces', ' 100'],
   ];
   for (const [name, amount] of badAmounts) {
     test(`rejects ${name} amount: ${JSON.stringify(amount)}`, { tag: ['@p0', '@money', '@contract'] }, async ({ api, world }) => {

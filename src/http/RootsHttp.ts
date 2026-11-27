@@ -23,6 +23,8 @@ export interface RequestOptions {
   multipart?: Record<string, string | { name: string; mimeType: string; buffer: Buffer }>;
   /** Override the bearer token (e.g. to test auth). null = no Authorization header. */
   token?: string | null;
+  /** Extra headers, e.g. X-Request-ID for log correlation. */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -34,7 +36,7 @@ export class RootsHttp {
   constructor(private readonly ctx: APIRequestContext, private readonly token: string) {}
 
   async request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<ApiResult<T>> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...(opts.headers ?? {}) };
     const token = opts.token === undefined ? this.token : opts.token;
     if (token !== null) headers.Authorization = `Bearer ${token}`;
 

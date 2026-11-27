@@ -55,6 +55,12 @@ export class World {
     return res.body;
   }
 
+  /** Creates an ACH withdrawal and returns the 201 response (not yet settled). */
+  async withdrawal(fromId: string, counterpartyId: string, amountMinor: MinorUnits, rail: 'ach' | 'sameday_ach' | 'fedwire' = 'ach') {
+    const { aTransfer } = await import('../builders/transfer.builder');
+    return this.api.transfers.create(aTransfer().from(fromId).toCounterparty(counterpartyId, rail).amount(amountMinor).build());
+  }
+
   async waitForTransfer(id: string, ...statuses: TransferStatus[]): Promise<Transfer> {
     return pollUntil(async () => (await this.api.transfers.get(id)).body, (t) => statuses.includes(t.status), {
       description: `transfer ${id} in [${statuses.join(', ')}]`,

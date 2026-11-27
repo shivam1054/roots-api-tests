@@ -20,7 +20,8 @@ test.describe('Idempotency on POST /transfers', () => {
     expect(replay.body.id).toBe(first.body.id);
 
     expectBalance((await api.accounts.get(from.id)).body.balance, { available_minor: usd('75.00') }); // held once, not twice
-    const holds = (await api.transfers.transactions(first.body.id)).body.data.filter((e) => e.type === 'hold');
+    // Holds are only listed when asked for (default types are principal and fee).
+    const holds = (await api.transfers.transactions(first.body.id, ['hold'])).body.data;
     expect(holds).toHaveLength(1);
   });
 
@@ -39,10 +40,10 @@ test.describe('Idempotency on POST /transfers', () => {
     const from = await world.fundedAccount(usd('100.00'));
     const to = await world.activeAccount(from.person_id);
     const key = idempotencyKey();
-    const fields = { source: { type: 'account', id: from.id }, destination: { type: 'account', id: to.id }, amount_minor: '500' };
+    const fields = { source: { type: 'account', id: from.id }, destination: { type: 'account', id: to.id }, amount_minor: '500', purpose: 'treasury' };
     expectStatus(await api.http.request('POST', '/api/v1/transfers', { idempotencyKey: key, rawBody: JSON.stringify(fields) }), 201);
 
-    const reordered = JSON.stringify({ amount_minor: '500', destination: fields.destination, source: fields.source });
+    const reordered = JSON.stringify({ purpose: 'treasury', amount_minor: '500', destination: fields.destination, source: fields.source });
     // Lesson for SDK authors: serialise once, store the bytes, resend them unchanged.
     expectProblem(await api.http.request('POST', '/api/v1/transfers', { idempotencyKey: key, rawBody: reordered }), 409, 'idempotency_key_conflict');
   });
