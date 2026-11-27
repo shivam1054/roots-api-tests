@@ -25,6 +25,7 @@ npm run test:sandbox    # same suite against the real sandbox
 |---|---|
 | Smoke | Onboard a customer, open and fund an account, move money, check both balances |
 | Onboarding and compliance | `review_not_ready` lists every gap. A sanctioned person is denied and can't open an account. A referred person waits for a manual decision. A cleared file is locked. |
+| Document upload | All 19 document types accepted. Unknown type, wrong `subject_type`, bad `issued_country` (`USA`, `XX`, `us`), `document_number` over 64 characters or with control characters, missing file: each returns 422 naming the field. Same-key retry returns the same document, a different type with the same key is 409, another client's person is 404. |
 | Accounts | Provisioning to active, close refused while there's a balance, frozen accounts can't send, closed is terminal |
 | Internal transfers | Hold while in flight (available ↓, pending ↑, current unchanged), moves exactly once, insufficient funds, a decline releases the hold, 8 invalid amount formats |
 | Withdrawals | ACH settles and the fee posts once. Rejected at submission. **Settled then returned (R03): principal back, fee kept, `settled_at` kept.** Blocked counterparty. Unsupported rail. Account number masked. |

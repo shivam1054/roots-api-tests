@@ -23,6 +23,15 @@ export interface Person {
   external_id?: string | null;
 }
 
+/** The 19 document types accepted by POST /api/v1/documents. */
+export const DOCUMENT_TYPES = [
+  'articles_of_incorporation', 'incorporation_documents', 'ownership_breakdown', 'ownership_chart',
+  'lease_agreement', 'bank_statement', 'term_sheet', 'financial_statement', 'utility_bill', 'invoice',
+  'bill_of_lading', 'commercial_contract', 'passport', 'national_id_front', 'national_id_back',
+  'drivers_license_front', 'drivers_license_back', 'regulatory_license', 'other',
+] as const;
+export type DocumentType = (typeof DOCUMENT_TYPES)[number];
+
 export interface Balance {
   available_minor: MinorUnits;
   pending_minor: MinorUnits;

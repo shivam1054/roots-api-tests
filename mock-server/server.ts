@@ -146,12 +146,28 @@ function submitReview(client: string, personId: string): Result {
   return { status: 200, body: strip(p) };
 }
 
+const DOCUMENT_TYPES = ['articles_of_incorporation', 'incorporation_documents', 'ownership_breakdown', 'ownership_chart', 'lease_agreement', 'bank_statement', 'term_sheet', 'financial_statement', 'utility_bill', 'invoice', 'bill_of_lading', 'commercial_contract', 'passport', 'national_id_front', 'national_id_back', 'drivers_license_front', 'drivers_license_back', 'regulatory_license', 'other'];
+const regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
+const isIsoCountry = (c: string) => /^[A-Z]{2}$/.test(c) && regionNames.of(c) !== c;
+
 function uploadDocument(client: string, fields: Record<string, string>): Result {
-  if (!fields.subject_id || !fields.type) fail(422, 'validation', 'subject_id and type are required');
+  // Field rules from the API reference for POST /api/v1/documents.
+  const v: any[] = [];
+  if (fields.subject_type !== 'person') v.push({ path: 'subject_type', code: 'invalid', message: 'Must be "person"' });
+  if (!fields.subject_id || fields.subject_id.length > 100) v.push({ path: 'subject_id', code: fields.subject_id ? 'too_long' : 'required' });
+  if (!fields.type) v.push({ path: 'type', code: 'required' });
+  else if (!DOCUMENT_TYPES.includes(fields.type)) v.push({ path: 'type', code: 'invalid', message: 'Unknown document type' });
+  if (fields.document_number !== undefined) {
+    const n = fields.document_number.replace(/\s+/g, ' ').trim();
+    if (!n || n.length > 64 || /[\x00-\x1f\x7f]/.test(fields.document_number)) v.push({ path: 'document_number', code: 'invalid', message: '1-64 characters, no control characters' });
+  }
+  if (fields.issued_country !== undefined && !isIsoCountry(fields.issued_country)) v.push({ path: 'issued_country', code: 'invalid', message: 'ISO 3166-1 alpha-2 code' });
+  if (!fields.file) v.push({ path: 'file', code: 'required' });
+  if (v.length) fail(422, 'validation', 'Request validation failed', v);
   const p = owned(persons, fields.subject_id, client, 'person');
   if (p.status !== 'pending' || p.status_detail === 'in_review') fail(409, 'conflict', 'Person file is locked');
   p.documents.push(fields.type);
-  return { status: 201, body: { id: id('doc'), subject_id: p.id, type: fields.type, created_at: now() } };
+  return { status: 201, body: { id: id('doc'), subject_type: 'person', subject_id: p.id, type: fields.type, document_number: fields.document_number ?? null, issued_country: fields.issued_country ?? null, created_at: now() } };
 }
 
 function createAccount(client: string, b: any): Result {
@@ -312,7 +328,7 @@ function problemBody(e: ApiError, path: string) {
 function parseMultipart(raw: Buffer): Record<string, string> {
   const text = raw.toString('latin1');
   const out: Record<string, string> = {};
-  for (const m of text.matchAll(/name="([^"]+)"(?:; filename="([^"]*)")?\r\n(?:Content-Type: [^\r]+\r\n)?\r\n([\s\S]*?)\r\n--/g)) out[m[1]] = m[2] ? `file:${m[2]}:${m[3].length}` : m[3];
+  for (const m of text.matchAll(/name="([^"]+)"(?:; filename="([^"]*)")?\r\n(?:Content-Type: [^\r]+\r\n)?\r\n([\s\S]*?)\r\n--/gi)) out[m[1]] = m[2] ? `file:${m[2]}:${m[3].length}` : m[3];
   return out;
 }
 
